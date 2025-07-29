@@ -123,3 +123,191 @@ class CLIVPCervix(nn.Module):
             logits: Classification logits
             features: Optional intermediate features
         """
+        # Encode image
+        image_features = self.encode_image(image)
+        projected_image = self.image_projection(image_features)
+        
+        if self.mode == 1 and text is not None:
+            # Encode text
+            text_features = self.encode_text(text)
+            projected_text = self.text_projection(text_features)
+            
+            # Apply cross-modal attention
+            attended_image, attended_text = self.cross_attention(projected_image, projected_text)
+            
+            # Fuse features
+            fused_features = torch.cat([attended_image, attended_text], dim=-1)
+            final_features = self.fusion(fused_features)
+            
+        else:
+            # Image only
+            final_features = projected_image
+        
+        # Classification
+        logits = self.classifier(final_features)
+        
+        if return_features:
+            return logits, final_features
+        return logits
+    
+    def get_image_text_similarity(self, image, text):
+        """Calculate cosine similarity between image and text embeddings."""
+        image_features = self.encode_image(image)
+        text_features = self.encode_text(text)
+        
+        similarity = torch.cosine_similarity(image_features, text_features, dim=-1)
+        return similarity
+
+
+class CrossModalAttention(nn.Module):
+    """Cross-modal attention mechanism for image-text fusion."""
+    
+    def __init__(self, hidden_dim, num_heads=8):
+        super(CrossModalAttention, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        
+        # Multi-head attention layers
+        self.image_to_text_attn = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout=0.1, batch_first=True
+        )
+        self.text_to_image_attn = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout=0.1, batch_first=True
+        )
+        
+        # Layer normalization
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        
+    def forward(self, image_features, text_features):
+        """
+        Apply bidirectional cross-modal attention.
+        
+        Args:
+            image_features: [batch_size, hidden_dim]
+            text_features: [batch_size, hidden_dim]
+            
+        Returns:
+            attended_image: Image features attended by text
+            attended_text: Text features attended by image
+        """
+        # Reshape for attention (add sequence dimension)
+        image_features = image_features.unsqueeze(1)  # [batch, 1, hidden_dim]
+        text_features = text_features.unsqueeze(1)    # [batch, 1, hidden_dim]
+        
+        # Image attended by text
+        attended_image, _ = self.image_to_text_attn(
+            query=image_features,
+            key=text_features,
+            value=text_features
+        )
+        attended_image = self.norm1(attended_image + image_features)
+        
+        # Text attended by image
+        attended_text, _ = self.text_to_image_attn(
+            query=text_features,
+            key=image_features,
+            value=image_features
+        )
+        attended_text = self.norm2(attended_text + text_features)
+        
+        # Remove sequence dimension
+        attended_image = attended_image.squeeze(1)
+        attended_text = attended_text.squeeze(1)
+        
+        return attended_image, attended_text
+
+
+class ContrastiveLoss(nn.Module):
+    """Contrastive loss for aligning image and text representations."""
+    
+    def __init__(self, temperature=0.07):
+        super(ContrastiveLoss, self).__init__()
+        self.temperature = temperature
+        
+    def forward(self, image_features, text_features):
+        """
+        Calculate contrastive loss between image and text features.
+        
+        Args:
+            image_features: Normalized image features [batch_size, feature_dim]
+            text_features: Normalized text features [batch_size, feature_dim]
+            
+        Returns:
+            loss: Contrastive loss value
+        """
+        batch_size = image_features.size(0)
+        
+        # Calculate similarity matrix
+        similarity_matrix = torch.matmul(image_features, text_features.T) / self.temperature
+        
+        # Labels: diagonal elements are positive pairs
+        labels = torch.arange(batch_size, device=image_features.device)
+        
+        # Calculate loss
+        loss_i2t = F.cross_entropy(similarity_matrix, labels)
+        loss_t2i = F.cross_entropy(similarity_matrix.T, labels)
+        
+        loss = (loss_i2t + loss_t2i) / 2
+        
+        return loss
+
+
+class CLIVPCervixWithContrastive(CLIVPCervix):
+    """Extended model with contrastive learning capabilities."""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.contrastive_loss = ContrastiveLoss(temperature=0.07)
+        
+    def forward_contrastive(self, image, text, alpha=0.5):
+        """
+        Forward pass with contrastive loss.
+        
+        Args:
+            image: Preprocessed image tensor
+            text: Tokenized text
+            alpha: Weight for contrastive loss
+            
+        Returns:
+            logits: Classification logits
+            total_loss: Combined classification and contrastive loss
+        """
+        # Get features
+        image_features = self.encode_image(image)
+        text_features = self.encode_text(text)
+        
+        # Get classification logits
+        logits = self.forward(image, text)
+        
+        # Calculate contrastive loss
+        contrastive_loss = self.contrastive_loss(image_features, text_features)
+        
+        return logits, contrastive_loss * alpha
+
+
+def create_model(num_classes=4, mode=1, pretrained_path=None, **kwargs):
+    """
+    Factory function to create CLIVP-Cervix model.
+    
+    Args:
+        num_classes: Number of classes
+        mode: 0 for image only, 1 for multimodal
+        pretrained_path: Path to pretrained weights
+        **kwargs: Additional model arguments
+        
+    Returns:
+        model: CLIVP-Cervix model instance
+    """
+    model = CLIVPCervixWithContrastive(
+        num_classes=num_classes,
+        mode=mode,
+        **kwargs
+    )
+    
+    if pretrained_path:
+        checkpoint = torch.load(pretrained_path, map_location='cpu')
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded pretrained weights from {pretrained_path}")
+    
+    return model
