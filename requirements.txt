@@ -1,0 +1,16 @@
+torch>=1.9.0
+torchvision>=0.10.0
+transformers>=4.16.0
+ftfy
+regex
+tqdm>=4.62.0
+git+https://github.com/openai/CLIP.git
+pandas>=1.3.0
+numpy>=1.21.0
+opencv-python>=4.5.0
+scikit-learn>=0.24.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
+pillow>=8.3.0
+tensorboard>=2.7.0
+wandb>=0.12.0
